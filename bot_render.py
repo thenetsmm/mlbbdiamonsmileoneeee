@@ -18,7 +18,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)
 MONGODB_URI = os.environ.get("MONGODB_URI")
 # BUY_ENABLED=1 -> real purchase. Otherwise DRY-RUN (player check + price + balance only).
 BUY_ENABLED = os.environ.get("BUY_ENABLED", "0") == "1"
-MAX_ORDER_COINS = float(os.environ.get("MAX_ORDER_COINS", "70"))
+MAX_ORDER_COINS = float(os.environ.get("MAX_ORDER_COINS", "100"))
 MAX_PER_DAY = int(os.environ.get("MAX_PER_DAY", "3"))
 CONFIRM_SECONDS = 120
 BUY_LOCK = threading.Lock()
@@ -159,8 +159,12 @@ def packages_text():
     if not s:
         return msg
     _, prices = sc.get_page(s)
-    return "Smile One MLBB (Smile Coins)\n\n" + "\n".join(
-        f"{pid}  {name}  -  {prices.get(pid, '?')}" for pid, name in sc.PACKAGES.items())
+    rows = []
+    for pid, name in sc.PACKAGES.items():
+        star = " ⚠️" if pid in sc.LIMITED else ""
+        rows.append(f"{pid}  {name}{star}\n     page {prices.get(pid, '?')} / up to {sc.MAX_COINS[pid]}")
+    return ("Smile One MLBB (Smile Coins)\n'up to' = worst-case charge used for limits\n"
+            "⚠️ = limited / level-restricted\n\n" + "\n".join(rows))
 
 
 def paid_today():
@@ -191,10 +195,11 @@ def cmd_buy(chat_id, from_id, arg):
         send(chat_id, msg)
         return
     csrf, prices = sc.get_page(s)
-    price = prices.get(pid)
-    if price is None:
+    shown = prices.get(pid)
+    if shown is None:
         send(chat_id, "Could not read the price. Not buying.")
         return
+    price = max(shown, sc.MAX_COINS[pid])
     if price > MAX_ORDER_COINS:
         send(chat_id, f"Price {price} is above MAX_ORDER_COINS ({MAX_ORDER_COINS}). Change it on Render if intended.")
         return
@@ -202,13 +207,16 @@ def cmd_buy(chat_id, from_id, arg):
         send(chat_id, f"Not enough Smile Coins: balance {bal}, price {price}.")
         return
     name = sc.check_role(s, csrf, uid, zone, pid)
+    exp = sc.expected_price(pid, shown)
     token = uuid.uuid4().hex[:10]
     orders_col().insert_one({"_id": token, "status": "pending", "created": time.time(),
                              "pid": pid, "price": price, "user_id": uid, "zone_id": zone})
     mode = "🟥 REAL purchase" if BUY_ENABLED else "🧪 DRY-RUN (nothing will be bought)"
     send(chat_id,
          f"Confirm\n\nPlayer: {name}\nUser ID: {uid}  Zone: {zone}\nPackage: {sc.PACKAGES[pid]}\n"
-         f"Price: {price} Smile Coins\nBalance: {bal}\nMode: {mode}\n\n"
+         f"Price: page {shown} / expected {exp if exp is not None else '?'} / up to {price} Smile Coins\nBalance: {bal}\nMode: {mode}\n"
+         + ("⚠️ Limited pack: once-per-week/month or level 5+ rules may apply.\n" if pid in sc.LIMITED else "")
+         + "\n"
          f"Wrong ID cannot be refunded. Tap within {CONFIRM_SECONDS}s.",
          keyboard=[[{"text": "✅ Confirm", "callback_data": f"buy:ok:{token}"},
                     {"text": "❌ Cancel", "callback_data": f"buy:no:{token}"}]])
@@ -277,7 +285,11 @@ def handle_callback(cb):
             col.update_one({"_id": token}, {"$set": {"status": "paid" if ok else "unknown", "note": info,
                                                      "before": before, "after": after}})
             if ok:
-                send(chat_id, f"✅ Payment accepted ({info}).\nBalance: {before} -> {after}\n\n"
+                try:
+                    charged = f"\nCharged: {round(before - after, 2)} Smile Coins"
+                except Exception:
+                    charged = ""
+                send(chat_id, f"✅ Payment accepted ({info}).\nBalance: {before} -> {after}{charged}\n\n"
                               "This does NOT prove delivery. Check the game and "
                               "smile.one/customer/order (status Sucesso).")
             else:
