@@ -1,0 +1,9 @@
+smileone_session.json
+*_session.json
+cookies.json
+chrome-profile/
+chrome_profile/
+orders_log.txt
+.env
+__pycache__/
+*.pyc
